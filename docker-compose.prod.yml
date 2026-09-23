@@ -1,0 +1,28 @@
+# Optional overlay for hosting on a VPS with a real domain + automatic
+# HTTPS (via Caddy / Let's Encrypt), instead of just an IP:port.
+#
+# Usage:
+#   cp Caddyfile.example Caddyfile   # then edit the domain inside
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# This adds Caddy on 80/443 as a reverse proxy in front of the app. The
+# app's own port (3000 by default) stays published too, from the base
+# docker-compose.yml — if you don't want it reachable directly, delete the
+# "ports:" lines under the app service there, or add a VPS firewall rule.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

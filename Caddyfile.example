@@ -1,0 +1,7 @@
+# Copy to "Caddyfile" and replace with your real domain (must already point
+# at your VPS's IP via an A record). Caddy then issues and renews a
+# Let's Encrypt certificate for it automatically — no manual SSL setup.
+
+your-domain.com {
+	reverse_proxy app:3000
+}

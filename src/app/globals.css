@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f7f5f0;
+  --paper-raised: #ffffff;
+  --ink: #211e1b;
+  --ink-soft: #6b655c;
+  --ink-faint: #a29a8d;
+  --line: #e2ddd1;
+  --line-strong: #cdc4b3;
+  --accent: #6b2a3e;
+  --accent-ink: #fff7f8;
+  --accent-soft: #f3e3e8;
+  --accent-soft-line: #e2c1cc;
+  --accent-soft-ink: #6b2a3e;
+  --state-ok: #2f6b4f;
+  --state-ok-soft: #e3efe8;
+  --state-warn: #96631a;
+  --state-warn-soft: #f5ead2;
+  --state-danger: #a83f28;
+  --state-danger-soft: #f6e0d8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171615;
+    --paper-raised: #211f1d;
+    --ink: #f0eae3;
+    --ink-soft: #b3a99c;
+    --ink-faint: #746b60;
+    --line: #363330;
+    --line-strong: #4a453f;
+    --accent: #d98ba3;
+    --accent-ink: #241014;
+    --accent-soft: #35232a;
+    --accent-soft-line: #55323e;
+    --accent-soft-ink: #eeb7c5;
+    --state-ok: #6dbb92;
+    --state-ok-soft: #1c2c23;
+    --state-warn: #dcae57;
+    --state-warn-soft: #322a17;
+    --state-danger: #e28e73;
+    --state-danger-soft: #362119;
+  }
+}
+
+@theme inline {
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --color-paper: var(--paper);
+  --color-paper-raised: var(--paper-raised);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-line: var(--accent-soft-line);
+  --color-accent-soft-ink: var(--accent-soft-ink);
+  --color-state-ok: var(--state-ok);
+  --color-state-ok-soft: var(--state-ok-soft);
+  --color-state-warn: var(--state-warn);
+  --color-state-warn-soft: var(--state-warn-soft);
+  --color-state-danger: var(--state-danger);
+  --color-state-danger-soft: var(--state-danger-soft);
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+h1, h2, h3 {
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 600;
+  text-wrap: balance;
+}
+.font-mono-num {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
