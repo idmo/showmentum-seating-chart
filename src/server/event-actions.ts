@@ -14,8 +14,14 @@ import {
   type PlacementInput,
   type TableInput,
 } from "@/lib/assign";
+import type { SectionKey, TableShape } from "@/lib/types";
 
-const { events, parties, partyMembers, placements } = schema;
+const { events, parties, partyMembers, placements, venueTables } = schema;
+
+// The parameter type of a db.transaction() callback — used so
+// allocateToGroup (below) can run either standalone or as part of a larger
+// transaction (auto-assign applies a whole plan in one transaction).
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export async function createEvent(venueId: string, formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
@@ -131,6 +137,18 @@ export async function uploadGuestList(eventId: string, csvText: string) {
   };
 }
 
+// Night-of guest check-in — independent of seating. Toggled from the guest
+// list's per-row button.
+export async function setCheckedIn(eventId: string, partyId: string, checkedIn: boolean) {
+  await db
+    .update(parties)
+    .set({ checkedInAt: checkedIn ? new Date() : null })
+    .where(eq(parties.id, partyId));
+
+  const [eventRow] = await db.select({ shareSlug: events.shareSlug }).from(events).where(eq(events.id, eventId));
+  if (eventRow) revalidatePath(`/e/${eventRow.shareSlug}`);
+}
+
 // ---------------------------------------------------------------------------
 // Loads the tables/parties/placements needed by the pure assign.ts helpers.
 // Shared by runAutoAssignAction and the split/move actions below (each
@@ -155,6 +173,7 @@ async function loadAssignState(eventId: string) {
     shape: t.shape,
     capacity: t.capacity,
     order: t.order,
+    groupId: t.groupId,
   }));
   const partyInputs: PartyInput[] = activeParties.map((p) => ({
     id: p.id,
@@ -178,7 +197,13 @@ export async function runAutoAssignAction(eventId: string) {
 
   await db.transaction(async (tx) => {
     for (const p of result.placed) {
-      await tx.update(placements).set({ tableId: p.tableId, reason: null }).where(eq(placements.id, p.placementId));
+      if ("tableId" in p) {
+        await tx.update(placements).set({ tableId: p.tableId, reason: null }).where(eq(placements.id, p.placementId));
+      } else {
+        // Planned into a linked group — split across its member tables,
+        // recomputed against live DB state (see allocateToGroup).
+        await allocateToGroup(tx, p.groupId, p.placementId);
+      }
     }
     for (const u of result.stillUnassigned) {
       await tx.update(placements).set({ reason: u.reason }).where(eq(placements.id, u.placementId));
@@ -227,6 +252,157 @@ export async function movePlacement(
 
   const [eventRow] = await db.select({ shareSlug: events.shareSlug }).from(events).where(eq(events.id, eventId));
   if (eventRow) revalidatePath(`/e/${eventRow.shareSlug}`);
+}
+
+// Regroups a split party back together — the drag-one-fragment-onto-another
+// counterpart to splitPlacement. Folds the source placement's count into
+// the target's row (so the merged party lands wherever the target already
+// was — a table, a group member, or the unassigned tray) and removes the
+// source row. Both rows must belong to the SAME party; the UI only offers
+// this when it can already tell they match, but it's re-checked here since
+// this is the authoritative boundary.
+export async function mergePlacements(eventId: string, sourcePlacementId: string, targetPlacementId: string) {
+  await db.transaction(async (tx) => {
+    if (sourcePlacementId === targetPlacementId) return;
+    const [source, target] = await Promise.all([
+      tx.query.placements.findFirst({ where: eq(placements.id, sourcePlacementId) }),
+      tx.query.placements.findFirst({ where: eq(placements.id, targetPlacementId) }),
+    ]);
+    if (!source || !target) return;
+    if (source.partyId !== target.partyId) {
+      throw new Error("Only pieces of the same party can be regrouped together.");
+    }
+    await tx
+      .update(placements)
+      .set({ count: target.count + source.count, reason: null })
+      .where(eq(placements.id, targetPlacementId));
+    await tx.delete(placements).where(eq(placements.id, sourcePlacementId));
+  });
+
+  const [eventRow] = await db.select({ shareSlug: events.shareSlug }).from(events).where(eq(events.id, eventId));
+  if (eventRow) revalidatePath(`/e/${eventRow.shareSlug}`);
+}
+
+// Seats a placement into a LINKED group of tables (a "virtual table" —
+// see linkTables in venue-actions.ts), splitting it across member tables
+// when it's bigger than any single member's free capacity. Fills members in
+// their section order, greedily. Anything that still doesn't fit (the
+// group's combined free capacity was less than the placement) is left
+// behind as a separate unassigned remainder with an explanatory reason,
+// rather than silently dropped.
+async function allocateToGroup(tx: Tx, groupId: string, placementId: string) {
+  const current = await tx.query.placements.findFirst({ where: eq(placements.id, placementId) });
+  if (!current || current.count <= 0) return;
+
+  const members = await tx
+    .select()
+    .from(venueTables)
+    .where(eq(venueTables.groupId, groupId))
+    .orderBy(asc(venueTables.order));
+  if (members.length === 0) return;
+
+  const memberIds = members.map((m) => m.id);
+  const usedByTable = new Map<string, number>();
+  const existing = await tx
+    .select({ tableId: placements.tableId, count: placements.count })
+    .from(placements)
+    .where(inArray(placements.tableId, memberIds));
+  for (const row of existing) {
+    if (!row.tableId || row.tableId === current.tableId) continue;
+    // Exclude this placement's own current seat, if any, from "used" —
+    // it's about to be reallocated, not double-counted.
+    usedByTable.set(row.tableId, (usedByTable.get(row.tableId) ?? 0) + row.count);
+  }
+
+  let remaining = current.count;
+  const allocations: { tableId: string; count: number }[] = [];
+  for (const m of members) {
+    if (remaining <= 0) break;
+    const used = usedByTable.get(m.id) ?? 0;
+    const free = m.capacity - used;
+    if (free <= 0) continue;
+    const take = Math.min(free, remaining);
+    allocations.push({ tableId: m.id, count: take });
+    remaining -= take;
+  }
+
+  if (allocations.length === 0) return;
+
+  const siblingMax = await tx
+    .select({ order: placements.order })
+    .from(placements)
+    .where(eq(placements.partyId, current.partyId))
+    .orderBy(asc(placements.order));
+  let nextOrder = siblingMax.length ? siblingMax[siblingMax.length - 1].order + 1 : current.order + 1;
+
+  // Reuse the original row for the first allocation; insert new rows for
+  // any further members needed, and one more for whatever didn't fit.
+  await tx
+    .update(placements)
+    .set({ tableId: allocations[0].tableId, count: allocations[0].count, reason: null })
+    .where(eq(placements.id, placementId));
+
+  for (const alloc of allocations.slice(1)) {
+    await tx.insert(placements).values({
+      partyId: current.partyId,
+      tableId: alloc.tableId,
+      count: alloc.count,
+      order: nextOrder++,
+      reason: null,
+    });
+  }
+
+  if (remaining > 0) {
+    await tx.insert(placements).values({
+      partyId: current.partyId,
+      tableId: null,
+      count: remaining,
+      order: nextOrder++,
+      reason: "didn't fit in the linked table — the rest is still unassigned",
+    });
+  }
+}
+
+export async function seatInGroup(eventId: string, groupId: string, placementId: string) {
+  await db.transaction(async (tx) => {
+    await allocateToGroup(tx, groupId, placementId);
+  });
+
+  const [eventRow] = await db.select({ shareSlug: events.shareSlug }).from(events).where(eq(events.id, eventId));
+  if (eventRow) revalidatePath(`/e/${eventRow.shareSlug}`);
+}
+
+// Creates a new table in the given section and seats the whole placement
+// there in one transaction — used by the event page's "move to section"
+// control when no existing table there has room, after the person confirms
+// adding one.
+export async function addTableAndSeat(
+  eventId: string,
+  venueId: string,
+  sectionKey: SectionKey,
+  shape: TableShape,
+  capacity: number,
+  placementId: string,
+) {
+  if (!Number.isFinite(capacity) || capacity < 1) throw new Error("Capacity must be at least 1.");
+
+  await db.transaction(async (tx) => {
+    const siblings = await tx
+      .select({ order: venueTables.order })
+      .from(venueTables)
+      .where(and(eq(venueTables.venueId, venueId), eq(venueTables.sectionKey, sectionKey)))
+      .orderBy(asc(venueTables.order));
+    const nextOrder = siblings.length ? siblings[siblings.length - 1].order + 1 : 0;
+    const [table] = await tx
+      .insert(venueTables)
+      .values({ venueId, sectionKey, shape, capacity: Math.floor(capacity), order: nextOrder })
+      .returning({ id: venueTables.id });
+    await tx.update(placements).set({ tableId: table.id, reason: null }).where(eq(placements.id, placementId));
+  });
+
+  const [eventRow] = await db.select({ shareSlug: events.shareSlug }).from(events).where(eq(events.id, eventId));
+  if (eventRow) revalidatePath(`/e/${eventRow.shareSlug}`);
+  revalidatePath(`/venues/${venueId}`);
 }
 
 // The explicit "click a party to split it first" action: replaces one

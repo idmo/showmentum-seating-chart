@@ -25,6 +25,10 @@ export interface TableInput {
   shape: TableShape;
   capacity: number;
   order: number;
+  // Two or more tables sharing a groupId act as one pooled "virtual table"
+  // in the UI (see the linkTables/unlinkGroup server actions) — optional so
+  // callers/tests that don't care about linking can omit it.
+  groupId?: string | null;
 }
 
 export interface PartyInput {
@@ -33,6 +37,10 @@ export interface PartyInput {
   pref: PartyPref;
   size: number;
   members: ParsedMember[];
+  // Night-of check-in timestamp (ISO string), or null/undefined if not
+  // checked in yet. Optional — purely informational for the guest list UI,
+  // never read by the seat-assignment logic in this file.
+  checkedInAt?: string | null;
 }
 
 export interface PlacementInput {
@@ -96,8 +104,12 @@ export function validateSplitCounts(total: number, counts: number[]): { ok: bool
 // No-preference parties fill Front, then Middle, then Back.
 // ---------------------------------------------------------------------------
 export interface AutoAssignResult {
-  // partyId+order -> {tableId, reason} for every placement that was touched
-  placed: Array<{ placementId: string; tableId: string }>;
+  // Each placed entry names EITHER a single table (tableId) OR a linked
+  // group (groupId) — never both. A group entry means the caller must
+  // split that placement across the group's member tables at write time
+  // (see seatInGroup / allocateToGroup in event-actions.ts), because this
+  // pure function only plans WHERE a party goes, not the DB-level split.
+  placed: Array<{ placementId: string; tableId: string } | { placementId: string; groupId: string }>;
   stillUnassigned: Array<{ placementId: string; reason: string }>;
 }
 
@@ -128,11 +140,30 @@ export function runAutoAssign(
     }
   });
 
+  type TableState = NonNullable<ReturnType<typeof tableState.get>>;
+
   const tablesBySection = (key: SectionKey) =>
     tables.filter((t) => t.sectionKey === key).map((t) => tableState.get(t.id)!);
 
-  function bestFit(candidates: ReturnType<typeof tableState.get>[], size: number) {
-    let best: ReturnType<typeof tableState.get> | null = null;
+  // Linked groups (see linkTables in venue-actions.ts) pool their members'
+  // capacity — a party that's too big for any single table in a section can
+  // still fit a group there. groupsBySection groups the SAME live
+  // tableState entries used above, so claiming from a group and claiming a
+  // standalone table both stay consistent with each other as the pass runs.
+  const groupsBySection = (key: SectionKey) => {
+    const map = new Map<string, TableState[]>();
+    tables
+      .filter((t) => t.sectionKey === key && t.groupId)
+      .forEach((t) => {
+        const list = map.get(t.groupId!) ?? [];
+        list.push(tableState.get(t.id)!);
+        map.set(t.groupId!, list);
+      });
+    return map;
+  };
+
+  function bestFit(candidates: (TableState | undefined)[], size: number) {
+    let best: TableState | null = null;
     for (const t of candidates) {
       if (!t) continue;
       if (t.remaining >= size) {
@@ -141,10 +172,45 @@ export function runAutoAssign(
     }
     return best;
   }
-  function claim(t: NonNullable<ReturnType<typeof tableState.get>>, size: number) {
+  function claim(t: TableState, size: number) {
     t.usedSeats += size;
     if (size >= PRIVATE_TABLE_THRESHOLD) t.remaining = 0;
     else t.remaining -= size;
+  }
+
+  // Group counterpart of bestFit/claim: no single member has room, but the
+  // group's members TOGETHER do. Picks the tightest-fitting group (least
+  // combined leftover), then fills members in their section order —
+  // deliberately simple capacity bookkeeping only (no "big party claims the
+  // whole table" shortcut here, since a group split is inherently a party
+  // spanning tables on purpose). The actual per-member split is redone,
+  // authoritatively, against live DB state when the plan is applied.
+  function bestFitGroup(groupMap: Map<string, TableState[]>, size: number) {
+    let bestId: string | null = null;
+    let bestLeftover = Infinity;
+    for (const [groupId, members] of groupMap) {
+      const total = members.reduce((sum, m) => sum + m.remaining, 0);
+      if (total >= size) {
+        const leftover = total - size;
+        if (leftover < bestLeftover) {
+          bestLeftover = leftover;
+          bestId = groupId;
+        }
+      }
+    }
+    return bestId;
+  }
+  function claimGroup(groupMap: Map<string, TableState[]>, groupId: string, size: number) {
+    const members = (groupMap.get(groupId) ?? []).slice().sort((a, b) => a.order - b.order);
+    let need = size;
+    for (const m of members) {
+      if (need <= 0) break;
+      const take = Math.min(m.remaining, need);
+      if (take <= 0) continue;
+      m.usedSeats += take;
+      m.remaining -= take;
+      need -= take;
+    }
   }
 
   const candidates = placements
@@ -171,14 +237,25 @@ export function runAutoAssign(
     if (t) {
       claim(t, placement.count);
       placed.push({ placementId: placement.id, tableId: t.id });
-    } else {
-      const maxCapInSection = Math.max(0, ...tablesBySection(section).map((x) => x!.capacity));
-      const reason =
-        placement.count > maxCapInSection
-          ? `party of ${placement.count} is larger than the biggest table in ${SECTION_LABELS[section]} (${maxCapInSection} seats) — split it and place each piece separately`
-          : `no open table in ${SECTION_LABELS[section]} has ${placement.count} free seats`;
-      stillUnassigned.push({ placementId: placement.id, reason });
+      return;
     }
+    const groupMap = groupsBySection(section);
+    const groupId = bestFitGroup(groupMap, placement.count);
+    if (groupId) {
+      claimGroup(groupMap, groupId, placement.count);
+      placed.push({ placementId: placement.id, groupId });
+      return;
+    }
+    const maxCapInSection = Math.max(
+      0,
+      ...tablesBySection(section).map((x) => x!.capacity),
+      ...[...groupMap.values()].map((members) => members.reduce((sum, m) => sum + m.capacity, 0)),
+    );
+    const reason =
+      placement.count > maxCapInSection
+        ? `party of ${placement.count} is larger than the biggest table (or linked table) in ${SECTION_LABELS[section]} (${maxCapInSection} seats) — split it and place each piece separately`
+        : `no open table in ${SECTION_LABELS[section]} has ${placement.count} free seats`;
+    stillUnassigned.push({ placementId: placement.id, reason });
   });
 
   // Phase 2: no-preference parties, fixed cascade Front -> Middle -> Back.
@@ -192,12 +269,25 @@ export function runAutoAssign(
         placedHere = true;
         break;
       }
+      const groupMap = groupsBySection(section);
+      const groupId = bestFitGroup(groupMap, placement.count);
+      if (groupId) {
+        claimGroup(groupMap, groupId, placement.count);
+        placed.push({ placementId: placement.id, groupId });
+        placedHere = true;
+        break;
+      }
     }
     if (!placedHere) {
-      const maxCapAnywhere = Math.max(0, ...tables.map((t) => t.capacity));
+      const groupCapacities = new Map<string, number>();
+      tables.forEach((t) => {
+        if (!t.groupId) return;
+        groupCapacities.set(t.groupId, (groupCapacities.get(t.groupId) ?? 0) + t.capacity);
+      });
+      const maxCapAnywhere = Math.max(0, ...tables.map((t) => t.capacity), ...groupCapacities.values());
       const reason =
         placement.count > maxCapAnywhere
-          ? `party of ${placement.count} is larger than the biggest table (${maxCapAnywhere} seats) — split it and place each piece separately`
+          ? `party of ${placement.count} is larger than the biggest table (or linked table) (${maxCapAnywhere} seats) — split it and place each piece separately`
           : `no section has ${placement.count} open seats left`;
       stillUnassigned.push({ placementId: placement.id, reason });
     }
@@ -240,6 +330,7 @@ export interface TableStateView {
   overCapacity: boolean;
   isPrivate: boolean;
   privateHolderName: string | null;
+  groupId: string | null;
   fragments: TableFragmentView[];
 }
 export interface DerivedView {
@@ -266,6 +357,7 @@ export function deriveView(
         overCapacity: false,
         isPrivate: false,
         privateHolderName: null,
+        groupId: t.groupId ?? null,
         fragments: [],
       },
     ]),

@@ -25,6 +25,24 @@ export const venues = pgTable("venues", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// A table_groups row is a "virtual table": two or more venue_tables linked
+// together to act as one bigger unit (e.g. two 4-tops pushed together for a
+// 7-top party). Capacity pools across the group's members; individual
+// members keep their own row (own shape/capacity/order) for physical setup,
+// print layout, and per-member editing. A group is always confined to one
+// section — see the linkTables/unlinkGroup actions.
+export const tableGroups = pgTable(
+  "table_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    venueId: uuid("venue_id")
+      .notNull()
+      .references(() => venues.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("table_groups_venue_id_idx").on(t.venueId)],
+);
+
 export const venueTables = pgTable(
   "venue_tables",
   {
@@ -36,8 +54,12 @@ export const venueTables = pgTable(
     shape: text("shape").$type<TableShape>().notNull(),
     capacity: integer("capacity").notNull(),
     order: integer("order").notNull().default(0),
+    groupId: uuid("group_id").references(() => tableGroups.id, { onDelete: "set null" }),
   },
-  (t) => [index("venue_tables_venue_id_idx").on(t.venueId)],
+  (t) => [
+    index("venue_tables_venue_id_idx").on(t.venueId),
+    index("venue_tables_group_id_idx").on(t.groupId),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -76,6 +98,11 @@ export const parties = pgTable(
     pref: text("pref").$type<PartyPref>().notNull().default("any"),
     size: integer("size").notNull(),
     active: boolean("active").notNull().default(true),
+    // Night-of guest check-in — null until someone taps "Check in" on the
+    // guest list; set back to null if it's toggled off. Distinct from
+    // seating (placements): a party can be seated but not yet checked in,
+    // or checked in before their table is finalized.
+    checkedInAt: timestamp("checked_in_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -141,8 +168,14 @@ export const venuesRelations = relations(venues, ({ many }) => ({
   events: many(events),
 }));
 
+export const tableGroupsRelations = relations(tableGroups, ({ one, many }) => ({
+  venue: one(venues, { fields: [tableGroups.venueId], references: [venues.id] }),
+  tables: many(venueTables),
+}));
+
 export const venueTablesRelations = relations(venueTables, ({ one, many }) => ({
   venue: one(venues, { fields: [venueTables.venueId], references: [venues.id] }),
+  group: one(tableGroups, { fields: [venueTables.groupId], references: [tableGroups.id] }),
   placements: many(placements),
 }));
 

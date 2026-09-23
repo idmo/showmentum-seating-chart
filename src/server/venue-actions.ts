@@ -1,12 +1,12 @@
 "use server";
 
 import { db, schema } from "@/db";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { SECTION_KEYS, type SectionKey, type TableShape } from "@/lib/types";
 
-const { venues, venueTables, placements } = schema;
+const { venues, venueTables, placements, tableGroups } = schema;
 
 export async function createVenue(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
@@ -92,6 +92,7 @@ export async function updateTable(
 
 export async function removeTable(tableId: string, venueId: string) {
   await db.transaction(async (tx) => {
+    const row = await tx.query.venueTables.findFirst({ where: eq(venueTables.id, tableId) });
     // Attach a reason before the FK's ON DELETE SET NULL clears tableId, so
     // anyone seated there shows up in the tray with an explanation instead
     // of a blank one.
@@ -100,6 +101,97 @@ export async function removeTable(tableId: string, venueId: string) {
       .set({ reason: "this table was removed from the venue" })
       .where(eq(placements.tableId, tableId));
     await tx.delete(venueTables).where(eq(venueTables.id, tableId));
+
+    // A linked group left with fewer than 2 members isn't a group anymore.
+    if (row?.groupId) {
+      const remaining = await tx
+        .select({ id: venueTables.id })
+        .from(venueTables)
+        .where(eq(venueTables.groupId, row.groupId));
+      if (remaining.length < 2) {
+        await tx.update(venueTables).set({ groupId: null }).where(eq(venueTables.groupId, row.groupId));
+        await tx.delete(tableGroups).where(eq(tableGroups.id, row.groupId));
+      }
+    }
+  });
+  revalidatePath(`/venues/${venueId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Linked tables — a "virtual table": two or more physical tables that pool
+// their capacity and are seated as one unit (see seatInGroup in
+// event-actions.ts). Managed from both the venue editor and the event page,
+// since a venue's owner might pre-link tables ahead of time for a known
+// physical constraint, or link two on the fly when a party turns out bigger
+// than any single table.
+// ---------------------------------------------------------------------------
+export async function linkTables(venueId: string, tableIds: string[]) {
+  const ids = Array.from(new Set(tableIds));
+  if (ids.length < 2) throw new Error("Select at least two tables to link.");
+
+  await db.transaction(async (tx) => {
+    const rows = await tx.select().from(venueTables).where(inArray(venueTables.id, ids));
+    if (rows.length !== ids.length) throw new Error("One of those tables no longer exists.");
+    if (rows.some((r) => r.venueId !== venueId)) throw new Error("Those tables aren't all in this venue.");
+    const section = rows[0].sectionKey;
+    if (rows.some((r) => r.sectionKey !== section)) {
+      throw new Error("Linked tables must all be in the same section.");
+    }
+
+    const staleGroupIds = Array.from(new Set(rows.map((r) => r.groupId).filter((g): g is string => g != null)));
+
+    const [group] = await tx.insert(tableGroups).values({ venueId }).returning({ id: tableGroups.id });
+    await tx.update(venueTables).set({ groupId: group.id }).where(inArray(venueTables.id, ids));
+
+    // Clean up any groups these tables used to belong to that are now empty
+    // (e.g. re-linking one table from a pair into a new trio).
+    for (const staleId of staleGroupIds) {
+      const remaining = await tx
+        .select({ id: venueTables.id })
+        .from(venueTables)
+        .where(eq(venueTables.groupId, staleId));
+      if (remaining.length === 0) {
+        await tx.delete(tableGroups).where(eq(tableGroups.id, staleId));
+      }
+    }
+  });
+
+  revalidatePath(`/venues/${venueId}`);
+}
+
+// Dissolves a linked group back into separate, individually-capacitied
+// tables. Guests already seated at the group's member tables are untouched
+// — they just go back to being seated "at a table" rather than "in a group".
+export async function unlinkGroup(venueId: string, groupId: string) {
+  await db.transaction(async (tx) => {
+    await tx.update(venueTables).set({ groupId: null }).where(eq(venueTables.groupId, groupId));
+    await tx.delete(tableGroups).where(eq(tableGroups.id, groupId));
+  });
+  revalidatePath(`/venues/${venueId}`);
+}
+
+// Moves every member of a linked group to a section together, keeping them
+// adjacent at the end of that section's order — the group-level counterpart
+// to moveTableToSectionEnd.
+export async function moveGroupToSectionEnd(venueId: string, groupId: string, sectionKey: SectionKey) {
+  await db.transaction(async (tx) => {
+    const members = await tx
+      .select()
+      .from(venueTables)
+      .where(eq(venueTables.groupId, groupId))
+      .orderBy(asc(venueTables.order));
+    if (members.length === 0) return;
+
+    const siblings = await tx
+      .select()
+      .from(venueTables)
+      .where(and(eq(venueTables.venueId, venueId), eq(venueTables.sectionKey, sectionKey)))
+      .orderBy(asc(venueTables.order));
+    const memberIds = new Set(members.map((m) => m.id));
+    const newList = [...siblings.filter((s) => !memberIds.has(s.id)), ...members];
+    for (let i = 0; i < newList.length; i++) {
+      await tx.update(venueTables).set({ sectionKey, order: i }).where(eq(venueTables.id, newList[i].id));
+    }
   });
   revalidatePath(`/venues/${venueId}`);
 }

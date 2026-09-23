@@ -34,6 +34,7 @@ export default async function EventPage({ params }: { params: Promise<{ shareSlu
         eventName={event.name}
         expectedGuests={event.expectedGuests}
         venueName={event.venue.name}
+        venueId={event.venueId}
         tables={tables}
         parties={parties}
         placements={placements}

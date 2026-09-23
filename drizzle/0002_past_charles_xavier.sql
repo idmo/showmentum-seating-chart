@@ -1,0 +1,1 @@
+ALTER TABLE "parties" ADD COLUMN "checked_in_at" timestamp with time zone;

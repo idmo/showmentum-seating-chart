@@ -54,6 +54,7 @@ export async function getEventBySlug(shareSlug: string) {
     shape: t.shape,
     capacity: t.capacity,
     order: t.order,
+    groupId: t.groupId,
   }));
   const parties: PartyInput[] = activeParties.map((p) => ({
     id: p.id,
@@ -61,6 +62,7 @@ export async function getEventBySlug(shareSlug: string) {
     pref: p.pref,
     size: p.size,
     members: p.members.map((m) => ({ name: m.name, size: m.size })),
+    checkedInAt: p.checkedInAt ? p.checkedInAt.toISOString() : null,
   }));
   const placements: PlacementInput[] = activeParties.flatMap((p) =>
     p.placements.map((pl) => ({

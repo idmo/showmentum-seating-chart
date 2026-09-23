@@ -5,9 +5,12 @@ import { useRouter } from "next/navigation";
 import {
   addTables,
   deleteVenue,
+  linkTables,
+  moveGroupToSectionEnd,
   moveTableToSectionEnd,
   removeTable,
   renameVenue,
+  unlinkGroup,
   updateTable,
 } from "@/server/venue-actions";
 import { SECTION_KEYS, TABLE_SHAPES, type SectionKey, type TableShape } from "@/lib/types";
@@ -22,6 +25,7 @@ type VenueTable = {
   shape: TableShape;
   capacity: number;
   order: number;
+  groupId: string | null;
 };
 type Venue = { id: string; name: string; tables: VenueTable[] };
 
@@ -117,19 +121,99 @@ function SectionEditor({
   onChange: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
+  const [linkMode, setLinkMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const totalSeats = tables.reduce((sum, t) => sum + t.capacity, 0);
+
+  const groups = new Map<string, VenueTable[]>();
+  const standalone: VenueTable[] = [];
+  tables.forEach((t) => {
+    if (t.groupId) {
+      const list = groups.get(t.groupId) ?? [];
+      list.push(t);
+      groups.set(t.groupId, list);
+    } else {
+      standalone.push(t);
+    }
+  });
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function confirmLink() {
+    const ids = Array.from(selected);
+    if (ids.length < 2) return;
+    startTransition(async () => {
+      await linkTables(venueId, ids);
+      setSelected(new Set());
+      setLinkMode(false);
+      onChange();
+    });
+  }
 
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-ink">{SECTION_LABELS[section]}</h3>
-        <Badge>{tables.length} tables · {totalSeats} seats</Badge>
+        <div className="flex items-center gap-2">
+          <Badge>{tables.length} tables · {totalSeats} seats</Badge>
+          {!linkMode && standalone.length >= 2 && (
+            <Button size="sm" variant="ghost" onClick={() => setLinkMode(true)}>
+              Link tables
+            </Button>
+          )}
+        </div>
       </div>
 
+      {linkMode && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed border-accent-soft-line bg-accent-soft p-2 text-xs">
+          <span className="text-ink-soft">Check 2 or more tables below to combine them into one virtual table.</span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="primary" disabled={selected.size < 2 || isPending} onClick={confirmLink}>
+              Link {selected.size > 0 ? `${selected.size} ` : ""}tables
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setLinkMode(false);
+                setSelected(new Set());
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {tables.map((table) => (
-          <TableCard key={table.id} venueId={venueId} table={table} onChange={onChange} />
+        {[...groups.entries()].map(([groupId, members]) => (
+          <GroupedTableCard
+            key={groupId}
+            venueId={venueId}
+            groupId={groupId}
+            members={members.slice().sort((a, b) => a.order - b.order)}
+            onChange={onChange}
+          />
         ))}
+        {standalone.map((table) =>
+          linkMode ? (
+            <SelectableTableRow
+              key={table.id}
+              table={table}
+              selected={selected.has(table.id)}
+              onToggle={() => toggleSelected(table.id)}
+            />
+          ) : (
+            <TableCard key={table.id} venueId={venueId} table={table} onChange={onChange} />
+          ),
+        )}
       </div>
 
       <form
@@ -177,7 +261,102 @@ function SectionEditor({
   );
 }
 
-function TableCard({ venueId, table, onChange }: { venueId: string; table: VenueTable; onChange: () => void }) {
+function SelectableTableRow({
+  table,
+  selected,
+  onToggle,
+}: {
+  table: VenueTable;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label
+      className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm text-ink ${
+        selected ? "border-accent bg-accent-soft" : "border-line bg-paper"
+      }`}
+    >
+      <input type="checkbox" checked={selected} onChange={onToggle} />
+      {SHAPE_LABELS[table.shape]} · <span className="font-mono-num">{table.capacity}</span> seats
+    </label>
+  );
+}
+
+function GroupedTableCard({
+  venueId,
+  groupId,
+  members,
+  onChange,
+}: {
+  venueId: string;
+  groupId: string;
+  members: VenueTable[];
+  onChange: () => void;
+}) {
+  const [isPending, startTransition] = useTransition();
+  const totalCapacity = members.reduce((sum, t) => sum + t.capacity, 0);
+  const section = members[0].sectionKey;
+
+  function unlink() {
+    if (!confirm("Unlink these tables? Each one goes back to being seated individually.")) return;
+    startTransition(async () => {
+      await unlinkGroup(venueId, groupId);
+      onChange();
+    });
+  }
+
+  function moveTo(target: SectionKey) {
+    startTransition(async () => {
+      await moveGroupToSectionEnd(venueId, groupId, target);
+      onChange();
+    });
+  }
+
+  return (
+    <div className="rounded-md border border-accent-soft-line bg-accent-soft p-2 sm:col-span-2">
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm text-ink">
+          <span className="font-medium">Linked · {members.length} tables</span>{" "}
+          <span className="font-mono-num text-ink-soft">· {totalCapacity} seats total</span>
+        </div>
+        <div className="flex items-center gap-1">
+          {SECTION_KEYS.filter((s) => s !== section).map((s) => (
+            <Button
+              key={s}
+              size="sm"
+              variant="ghost"
+              onClick={() => moveTo(s)}
+              disabled={isPending}
+              title={`Move the whole linked group to ${SECTION_LABELS[s]}`}
+            >
+              → {SECTION_LABELS[s]}
+            </Button>
+          ))}
+          <Button size="sm" variant="ghost" onClick={unlink} disabled={isPending}>
+            Unlink
+          </Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+        {members.map((m) => (
+          <TableCard key={m.id} venueId={venueId} table={m} onChange={onChange} hideMoveButtons />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TableCard({
+  venueId,
+  table,
+  onChange,
+  hideMoveButtons = false,
+}: {
+  venueId: string;
+  table: VenueTable;
+  onChange: () => void;
+  hideMoveButtons?: boolean;
+}) {
   const [isPending, startTransition] = useTransition();
   const [editing, setEditing] = useState(false);
   const [shape, setShape] = useState(table.shape);
@@ -239,11 +418,12 @@ function TableCard({ venueId, table, onChange }: { venueId: string; table: Venue
         {SHAPE_LABELS[table.shape]} · <span className="font-mono-num">{table.capacity}</span> seats
       </div>
       <div className="flex items-center gap-1">
-        {SECTION_KEYS.filter((s) => s !== table.sectionKey).map((s) => (
-          <Button key={s} size="sm" variant="ghost" onClick={() => moveTo(s)} disabled={isPending} title={`Move to ${SECTION_LABELS[s]}`}>
-            → {SECTION_LABELS[s]}
-          </Button>
-        ))}
+        {!hideMoveButtons &&
+          SECTION_KEYS.filter((s) => s !== table.sectionKey).map((s) => (
+            <Button key={s} size="sm" variant="ghost" onClick={() => moveTo(s)} disabled={isPending} title={`Move to ${SECTION_LABELS[s]}`}>
+              → {SECTION_LABELS[s]}
+            </Button>
+          ))}
         <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
           Edit
         </Button>
