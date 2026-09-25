@@ -101,3 +101,20 @@ test("normalizePref reads the first letter, defaults to any", () => {
   assert.equal(normalizePref(""), "any");
   assert.equal(normalizePref("no preference"), "any");
 });
+
+test("an implausibly large single-row party size is still applied, but produces a warning", () => {
+  // Regression case: a source-data edit once turned "4" into "42" by
+  // appending a digit instead of replacing it.
+  const csv = ["name,size,section", "Matt Johnson,42,front"].join("\n");
+  const { groups, warnings, errors } = parseGuestList(csv);
+  assert.equal(errors.length, 0);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].size, 42);
+  assert.match(warnings.join(" "), /unusually large/);
+});
+
+test("ordinary row sizes don't trigger the large-party-size warning", () => {
+  const csv = ["name,size,section", "Chen Family,6,front"].join("\n");
+  const { warnings } = parseGuestList(csv);
+  assert.equal(warnings.length, 0);
+});

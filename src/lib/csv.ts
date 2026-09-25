@@ -78,6 +78,13 @@ const SIZE_KEYS = [
   "size", "partysize", "count", "guests", "seats", "number", "num", "qty",
   "quantity", "headcount", "people", "pax", "tickets",
 ];
+// A single row claiming a party this large is far more likely a typo in the
+// source data (digits appended instead of replaced, a stray keystroke) than
+// a real guest count for one ticket order — flagged as a warning, not an
+// error, since it's still applied (a genuinely huge order is rare but not
+// impossible).
+const MAX_PLAUSIBLE_ROW_SIZE = 20;
+
 const SECTION_KEYS = [
   "section", "location", "area", "zone", "preference", "pref", "seating",
   "seatingpreference", "tablepreference", "placement", "placementpreference",
@@ -169,6 +176,11 @@ export function parseGuestList(text: string): ParseResult {
     if (!size || size < 1 || isNaN(size)) {
       errors.push(`Row ${r + 1} (“${name}”): couldn’t read a size, skipped.`);
       continue;
+    }
+    if (size > MAX_PLAUSIBLE_ROW_SIZE) {
+      warnings.push(
+        `Row ${r + 1} (“${name}”): party size of ${size} looks unusually large — double-check it isn’t a typo (e.g. a “4” edited into “42” instead of replaced).`,
+      );
     }
 
     const displayName = partyRaw || name;

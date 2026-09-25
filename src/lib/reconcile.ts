@@ -13,9 +13,29 @@
 // - A party no longer in the CSV is deactivated (soft-deleted): its seats
 //   free up, but its history isn't destroyed.
 // - A party that's new to the CSV is created, fully unassigned.
+// - If a party's size jumps by a suspiciously large amount, a warning is
+//   raised (but the new size is still applied) — see isSuspiciousJump below.
+//   Real bug this caught: a source export once had a row's "4" edited to
+//   "2" by appending rather than replacing, silently becoming "42".
 
 import type { PartyPref } from "./types";
 import type { ParsedGroup, ParsedMember } from "./csv";
+
+// A guest-count increase this far out of proportion to the previous count is
+// much more likely a data-entry slip upstream (digits appended instead of
+// replaced, a misread order, a pasted total in the wrong field) than a real
+// change, so it's worth calling out. Both conditions must hold — a large
+// multiple alone would flag every brand-new-ish party (e.g. 1 -> 4), and a
+// large absolute jump alone would flag legitimate growth of an already-big
+// party (e.g. 20 -> 30) — so together they aim at the "4 -> 42" shape of bug
+// without nagging about ordinary changes.
+const SUSPICIOUS_JUMP_MULTIPLE = 3;
+const SUSPICIOUS_JUMP_ABSOLUTE = 10;
+
+export function isSuspiciousJump(oldSize: number, newSize: number): boolean {
+  if (oldSize <= 0 || newSize <= oldSize) return false;
+  return newSize >= oldSize * SUSPICIOUS_JUMP_MULTIPLE && newSize - oldSize >= SUSPICIOUS_JUMP_ABSOLUTE;
+}
 
 export interface ExistingPlacementSummary {
   id: string;
@@ -99,6 +119,11 @@ export function planReconcile(
       if (newSize !== match.size) {
         warnings.push(
           `“${group.name}” updated from ${match.size} to ${newSize} guest${newSize === 1 ? "" : "s"}.`,
+        );
+      }
+      if (isSuspiciousJump(match.size, newSize)) {
+        warnings.push(
+          `⚠️ “${group.name}” jumped from ${match.size} to ${newSize} guests — that’s a big enough jump it may be a data-entry error rather than a real change. Double-check the source file before seating them.`,
         );
       }
     } else {

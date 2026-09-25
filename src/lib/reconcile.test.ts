@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planReconcile, type ExistingPartySummary } from "./reconcile";
+import { planReconcile, isSuspiciousJump, type ExistingPartySummary } from "./reconcile";
 import type { ParsedGroup } from "./csv";
 
 test("a party present in both keeps its id and existing seated placement untouched", () => {
@@ -108,4 +108,37 @@ test("guest count decrease that eliminates a whole fragment removes it and moves
     { kind: "remove", placementId: "pl-2" },
     { kind: "trim", placementId: "pl-1", newCount: 9 },
   ]);
+});
+
+test("isSuspiciousJump flags a disproportionate size increase but not ordinary growth", () => {
+  // Regression case: a CSV re-upload once turned a party of 4 into 42
+  // because a source-data edit appended "2" instead of replacing "4".
+  assert.equal(isSuspiciousJump(4, 42), true);
+  // Ordinary growth (e.g. someone added a couple of guests) shouldn't trip it.
+  assert.equal(isSuspiciousJump(4, 8), false);
+  assert.equal(isSuspiciousJump(2, 10), false);
+  // A shrink, or no change, is never "suspicious" in this sense.
+  assert.equal(isSuspiciousJump(10, 4), false);
+  assert.equal(isSuspiciousJump(4, 4), false);
+  // No prior size to compare against -> nothing to flag.
+  assert.equal(isSuspiciousJump(0, 42), false);
+});
+
+test("uploading a suspicious size jump for an existing party still applies it, but adds a warning", () => {
+  const existing: ExistingPartySummary[] = [
+    {
+      id: "party-1",
+      groupKey: "matt johnson",
+      name: "Matt Johnson",
+      pref: "front",
+      size: 4,
+      placements: [{ id: "pl-1", tableId: null, count: 4, order: 0 }],
+    },
+  ];
+  const fresh: ParsedGroup[] = [
+    { groupKey: "matt johnson", name: "Matt Johnson", pref: "front", size: 42, members: [{ name: "Matt Johnson", size: 42 }] },
+  ];
+  const plan = planReconcile(existing, fresh);
+  assert.equal(plan.toUpdate[0].size, 42);
+  assert.match(plan.warnings.join(" "), /jumped from 4 to 42/);
 });

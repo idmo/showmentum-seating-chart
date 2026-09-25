@@ -267,6 +267,16 @@ export function EventBoard(props: Props) {
     });
   }
 
+  // Undo of the above, or just shrinking a table back down. The button is
+  // disabled (see TableDropCard) once capacity would drop to 0 or below the
+  // seats already in use, so this doesn't need to re-check that itself.
+  function handleRemoveSeat(tableId: string, currentCapacity: number) {
+    startTransition(async () => {
+      await updateTable(tableId, props.venueId, { capacity: currentCapacity - 1 });
+      refresh();
+    });
+  }
+
   // User-assignable table numbers (e.g. matching a printed floor plan) —
   // a standalone table sets its own; a linked group writes the same number
   // onto every member so it reads as one consistently-numbered unit.
@@ -621,6 +631,7 @@ export function EventBoard(props: Props) {
                     onMoveToSection={handleMoveToSection}
                     onMoveToUnassigned={handleMoveToUnassigned}
                     onAddSeat={() => handleAddSeat(table.id, table.capacity)}
+                    onRemoveSeat={() => handleRemoveSeat(table.id, table.capacity)}
                     onFragmentDrop={handleFragmentDrop}
                   />
                 );
@@ -921,6 +932,7 @@ function TableDropCard({
   onMoveToSection,
   onMoveToUnassigned,
   onAddSeat,
+  onRemoveSeat,
   onFragmentDrop,
   onSetTableNumber,
 }: {
@@ -940,6 +952,7 @@ function TableDropCard({
   onMoveToSection: (placementId: string, count: number, section: SectionKey) => void;
   onMoveToUnassigned: (placementId: string) => void;
   onAddSeat: () => void;
+  onRemoveSeat: () => void;
   onFragmentDrop: (sourcePlacementId: string, targetPlacementId: string) => boolean;
   onSetTableNumber: (tableNumber: number | null) => void;
 }) {
@@ -984,6 +997,21 @@ function TableDropCard({
           <span className="font-mono-num text-ink-soft">
             {table.usedSeats}/{table.capacity}
           </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveSeat();
+            }}
+            disabled={table.capacity <= 1 || table.capacity <= table.usedSeats}
+            title={
+              table.capacity <= table.usedSeats
+                ? "Can't remove a seat that's currently occupied — move or unseat a guest first"
+                : "Remove a seat from this table"
+            }
+            className="no-print rounded border border-line-strong/60 px-1 text-[11px] font-medium text-ink-soft hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line-strong/60 disabled:hover:text-ink-soft"
+          >
+            −1 seat
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
