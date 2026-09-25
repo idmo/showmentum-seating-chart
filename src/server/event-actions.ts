@@ -174,6 +174,7 @@ async function loadAssignState(eventId: string) {
     capacity: t.capacity,
     order: t.order,
     groupId: t.groupId,
+    tableNumber: t.tableNumber,
   }));
   const partyInputs: PartyInput[] = activeParties.map((p) => ({
     id: p.id,

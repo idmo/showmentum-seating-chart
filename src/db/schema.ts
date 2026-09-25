@@ -55,6 +55,11 @@ export const venueTables = pgTable(
     capacity: integer("capacity").notNull(),
     order: integer("order").notNull().default(0),
     groupId: uuid("group_id").references(() => tableGroups.id, { onDelete: "set null" }),
+    // User-assignable table number (e.g. matches a physical table tent or
+    // floor plan) — null until someone sets it. Purely a label: nothing in
+    // lib/assign.ts reads it, and it's never auto-generated or enforced
+    // unique, since a venue may legitimately reuse or skip numbers.
+    tableNumber: integer("table_number"),
   },
   (t) => [
     index("venue_tables_venue_id_idx").on(t.venueId),

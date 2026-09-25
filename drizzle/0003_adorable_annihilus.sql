@@ -1,0 +1,1 @@
+ALTER TABLE "venue_tables" ADD COLUMN "table_number" integer;

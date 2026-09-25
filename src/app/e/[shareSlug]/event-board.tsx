@@ -30,6 +30,7 @@ import {
   moveGroupToSectionEnd,
   moveTableToSectionEnd,
   removeTable,
+  setGroupTableNumber,
   unlinkGroup,
   updateTable,
 } from "@/server/venue-actions";
@@ -262,6 +263,22 @@ export function EventBoard(props: Props) {
   function handleAddSeat(tableId: string, currentCapacity: number) {
     startTransition(async () => {
       await updateTable(tableId, props.venueId, { capacity: currentCapacity + 1 });
+      refresh();
+    });
+  }
+
+  // User-assignable table numbers (e.g. matching a printed floor plan) —
+  // a standalone table sets its own; a linked group writes the same number
+  // onto every member so it reads as one consistently-numbered unit.
+  function handleSetTableNumber(tableId: string, tableNumber: number | null) {
+    startTransition(async () => {
+      await updateTable(tableId, props.venueId, { tableNumber });
+      refresh();
+    });
+  }
+  function handleSetGroupTableNumber(groupId: string, tableNumber: number | null) {
+    startTransition(async () => {
+      await setGroupTableNumber(groupId, props.venueId, tableNumber);
       refresh();
     });
   }
@@ -554,7 +571,9 @@ export function EventBoard(props: Props) {
                     <GroupedTableDropCard
                       key={groupId}
                       groupId={groupId}
+                      tableNumber={members[0]?.tableNumber ?? null}
                       members={members}
+                      onSetTableNumber={(n) => handleSetGroupTableNumber(groupId, n)}
                       reassigned={view.reassigned}
                       onSplit={(frag) => setSplitTarget({ placementId: frag.placementId, partyName: frag.party.name, count: frag.count })}
                       onDragStartFragment={setDraggingId}
@@ -586,6 +605,8 @@ export function EventBoard(props: Props) {
                   <TableDropCard
                     key={table.id}
                     table={table}
+                    tableNumber={table.tableNumber}
+                    onSetTableNumber={(n) => handleSetTableNumber(table.id, n)}
                     reassigned={view.reassigned}
                     onDrop={(placementId) => handleDrop(table.id, placementId)}
                     onDragStartFragment={setDraggingId}
@@ -835,8 +856,57 @@ function SectionDropZone({
   );
 }
 
+// A small always-editable field for a user-assigned table number (see
+// setTableNumber/setGroupTableNumber). Keeps its own draft text so typing
+// doesn't fight the server round-trip, and only commits — via onSave — on
+// blur or Enter, reverting on Escape or on an invalid value.
+function TableNumberField({
+  value,
+  onSave,
+}: {
+  value: number | null;
+  onSave: (tableNumber: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed === "") {
+      if (value !== null) onSave(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 1) {
+      setDraft(value === null ? "" : String(value));
+      return;
+    }
+    if (n !== value) onSave(n);
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      draggable={false}
+      value={draft}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") setDraft(value === null ? "" : String(value));
+      }}
+      placeholder="#"
+      title="Table number — set your own, blank to clear"
+      aria-label="Table number"
+      className="no-print w-9 rounded border border-line-strong/60 bg-paper px-1 py-0.5 text-center font-mono-num text-[11px] text-ink-soft focus:border-accent focus:outline-none"
+    />
+  );
+}
+
 function TableDropCard({
   table,
+  tableNumber,
   reassigned,
   onDrop,
   onDragStartFragment,
@@ -852,8 +922,10 @@ function TableDropCard({
   onMoveToUnassigned,
   onAddSeat,
   onFragmentDrop,
+  onSetTableNumber,
 }: {
   table: TableStateView;
+  tableNumber: number | null;
   reassigned: (f: TableFragmentView) => boolean;
   onDrop: (placementId: string) => void;
   onDragStartFragment: (id: string) => void;
@@ -869,6 +941,7 @@ function TableDropCard({
   onMoveToUnassigned: (placementId: string) => void;
   onAddSeat: () => void;
   onFragmentDrop: (sourcePlacementId: string, targetPlacementId: string) => boolean;
+  onSetTableNumber: (tableNumber: number | null) => void;
 }) {
   const [over, setOver] = useState(false);
   return (
@@ -901,7 +974,8 @@ function TableDropCard({
         title="Drag to move this table to another section"
         className="mb-1.5 flex cursor-grab items-center justify-between text-xs active:cursor-grabbing"
       >
-        <span className="font-medium text-ink">
+        <span className="flex items-center gap-1 font-medium text-ink">
+          <TableNumberField key={tableNumber ?? "none"} value={tableNumber} onSave={onSetTableNumber} />
           {table.shape} · {table.capacity} seats
         </span>
         <div className="flex items-center gap-1">
@@ -1031,6 +1105,7 @@ function SelectableTableChip({
 // MoveToSelect can split them across members automatically.
 function GroupedTableDropCard({
   groupId,
+  tableNumber,
   members,
   reassigned,
   onSplit,
@@ -1046,8 +1121,10 @@ function GroupedTableDropCard({
   onMoveToSection,
   onMoveToUnassigned,
   onFragmentDrop,
+  onSetTableNumber,
 }: {
   groupId: string;
+  tableNumber: number | null;
   members: TableStateView[];
   reassigned: (f: TableFragmentView) => boolean;
   onSplit: (f: TableFragmentView) => void;
@@ -1063,6 +1140,7 @@ function GroupedTableDropCard({
   onMoveToSection: (placementId: string, count: number, section: SectionKey) => void;
   onMoveToUnassigned: (placementId: string) => void;
   onFragmentDrop: (sourcePlacementId: string, targetPlacementId: string) => boolean;
+  onSetTableNumber: (tableNumber: number | null) => void;
 }) {
   const [over, setOver] = useState(false);
   const capacity = members.reduce((sum, m) => sum + m.capacity, 0);
@@ -1108,7 +1186,8 @@ function GroupedTableDropCard({
         title="Drag to move this whole linked table to another section"
         className="mb-1.5 flex cursor-grab items-center justify-between text-xs active:cursor-grabbing"
       >
-        <span className="font-medium text-ink">
+        <span className="flex items-center gap-1 font-medium text-ink">
+          <TableNumberField key={tableNumber ?? "none"} value={tableNumber} onSave={onSetTableNumber} />
           Linked · {members.length} tables ({members.map((m) => m.shape).join(" + ")})
         </span>
         <div className="flex items-center gap-1">
@@ -1327,7 +1406,7 @@ function SplitModal({
   );
 }
 
-type GuestListSortKey = "name" | "size" | "pref" | "seated" | "checkedIn";
+type GuestListSortKey = "name" | "guests" | "size" | "pref" | "seated" | "checkedIn";
 type GuestListStatusFilter = "all" | "unassigned" | "seated" | "checked-in" | "not-checked-in";
 
 function GuestListTable({
@@ -1361,7 +1440,8 @@ function GuestListTable({
   const tableLabel = (tableId: string) => {
     const t = view.tableState.get(tableId);
     if (!t) return "—";
-    return `${SECTION_LABELS[t.sectionKey]} · ${t.shape} (${t.capacity})`;
+    const prefix = t.tableNumber !== null ? `Table ${t.tableNumber} — ` : "";
+    return `${prefix}${SECTION_LABELS[t.sectionKey]} · ${t.shape} (${t.capacity})`;
   };
 
   const allRows = parties.map((party) => {
@@ -1373,7 +1453,8 @@ function GuestListTable({
         .forEach((f) => seated.push(`${tableLabel(t.id)} ×${f.count}`));
     });
     const seatedCount = party.size - unassignedCount;
-    return { party, seated, unassignedCount, seatedCount, checkedIn: Boolean(party.checkedInAt) };
+    const guestsLabel = memberList(party.members);
+    return { party, seated, unassignedCount, seatedCount, guestsLabel, checkedIn: Boolean(party.checkedInAt) };
   });
 
   const q = search.trim().toLowerCase();
@@ -1395,6 +1476,9 @@ function GuestListTable({
     switch (sortKey) {
       case "name":
         cmp = a.party.name.localeCompare(b.party.name);
+        break;
+      case "guests":
+        cmp = a.guestsLabel.localeCompare(b.guestsLabel);
         break;
       case "size":
         cmp = a.party.size - b.party.size;
@@ -1448,7 +1532,11 @@ function GuestListTable({
                   Party {sortArrow("name")}
                 </button>
               </th>
-              <th className="py-1.5 pr-3">Guests</th>
+              <th className="py-1.5 pr-3">
+                <button onClick={() => toggleSort("guests")} className="inline-flex items-center gap-1 hover:text-accent">
+                  Guests {sortArrow("guests")}
+                </button>
+              </th>
               <th className="py-1.5 pr-3">
                 <button onClick={() => toggleSort("size")} className="inline-flex items-center gap-1 hover:text-accent">
                   Size {sortArrow("size")}
@@ -1479,10 +1567,10 @@ function GuestListTable({
                 </td>
               </tr>
             )}
-            {rows.map(({ party, seated, unassignedCount, checkedIn }) => (
+            {rows.map(({ party, seated, unassignedCount, guestsLabel, checkedIn }) => (
               <tr key={party.id} className="border-b border-line/60">
                 <td className="py-1.5 pr-3 font-medium text-ink">{party.name}</td>
-                <td className="py-1.5 pr-3 text-ink-soft">{memberList(party.members)}</td>
+                <td className="py-1.5 pr-3 text-ink-soft">{guestsLabel}</td>
                 <td className="py-1.5 pr-3 font-mono-num text-ink-soft">{party.size}</td>
                 <td className="py-1.5 pr-3">
                   {party.pref === "any" ? (

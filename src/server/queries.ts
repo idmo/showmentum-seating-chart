@@ -55,6 +55,7 @@ export async function getEventBySlug(shareSlug: string) {
     capacity: t.capacity,
     order: t.order,
     groupId: t.groupId,
+    tableNumber: t.tableNumber,
   }));
   const parties: PartyInput[] = activeParties.map((p) => ({
     id: p.id,

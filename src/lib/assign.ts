@@ -29,6 +29,9 @@ export interface TableInput {
   // in the UI (see the linkTables/unlinkGroup server actions) — optional so
   // callers/tests that don't care about linking can omit it.
   groupId?: string | null;
+  // User-assignable label (see setTableNumber in venue-actions.ts) — purely
+  // informational, never read by the seat-assignment logic in this file.
+  tableNumber?: number | null;
 }
 
 export interface PartyInput {
@@ -331,6 +334,7 @@ export interface TableStateView {
   isPrivate: boolean;
   privateHolderName: string | null;
   groupId: string | null;
+  tableNumber: number | null;
   fragments: TableFragmentView[];
 }
 export interface DerivedView {
@@ -358,6 +362,7 @@ export function deriveView(
         isPrivate: false,
         privateHolderName: null,
         groupId: t.groupId ?? null,
+        tableNumber: t.tableNumber ?? null,
         fragments: [],
       },
     ]),

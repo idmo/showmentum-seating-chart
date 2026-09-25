@@ -75,7 +75,7 @@ export async function addTables(
 export async function updateTable(
   tableId: string,
   venueId: string,
-  changes: { shape?: TableShape; capacity?: number },
+  changes: { shape?: TableShape; capacity?: number; tableNumber?: number | null },
 ) {
   const patch: Partial<typeof venueTables.$inferInsert> = {};
   if (changes.shape) patch.shape = changes.shape;
@@ -85,8 +85,27 @@ export async function updateTable(
     }
     patch.capacity = Math.floor(changes.capacity);
   }
+  if (changes.tableNumber !== undefined) {
+    if (changes.tableNumber !== null && (!Number.isFinite(changes.tableNumber) || changes.tableNumber < 1)) {
+      throw new Error("Table number must be a positive number.");
+    }
+    patch.tableNumber = changes.tableNumber === null ? null : Math.floor(changes.tableNumber);
+  }
   if (Object.keys(patch).length === 0) return;
   await db.update(venueTables).set(patch).where(eq(venueTables.id, tableId));
+  revalidatePath(`/venues/${venueId}`);
+}
+
+// A linked group's table number is user-assigned the same way a standalone
+// table's is, but since a group is several venueTables rows sharing a
+// groupId, the number is written onto every member so the group reads as
+// one consistently-numbered unit (see GroupedTableDropCard).
+export async function setGroupTableNumber(groupId: string, venueId: string, tableNumber: number | null) {
+  if (tableNumber !== null && (!Number.isFinite(tableNumber) || tableNumber < 1)) {
+    throw new Error("Table number must be a positive number.");
+  }
+  const value = tableNumber === null ? null : Math.floor(tableNumber);
+  await db.update(venueTables).set({ tableNumber: value }).where(eq(venueTables.groupId, groupId));
   revalidatePath(`/venues/${venueId}`);
 }
 
